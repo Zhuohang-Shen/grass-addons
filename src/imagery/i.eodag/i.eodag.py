@@ -263,13 +263,20 @@ import json
 import os
 import re
 import sys
+import urllib.request
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from hashlib import md5
 from pathlib import Path
 from subprocess import PIPE
 
 import grass.script as gs
 from grass.pygrass.modules import Module
+
+try:
+    import pyotp
+except ImportError:
+    pyotp = None
 
 
 def get_aoi_box(vector: str | None = None) -> str:
@@ -1132,6 +1139,22 @@ def print_query(geometry, queryables, **kwargs) -> None:
     print(json.dumps(query_dict, indent=4))
 
 
+def get_time_offset():
+    """Returns timedelta offset between server and local time. 0 if unreachable."""
+    try:
+        response = urllib.request.urlopen("https://creodias.eu", timeout=3)
+        server_date_str = response.headers.get("Date")
+        if server_date_str:
+            server_time = parsedate_to_datetime(server_date_str)
+            local_time = datetime.now(timezone.utc)
+            # Return the offset to be added to local time to get server time
+            return server_time - local_time
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
+        pass
+
+    return timedelta(0)
+
+
 def main() -> None:
     # Products: https://github.com/CS-SI/eodag/blob/develop/eodag/resources/product_types.yml
 
@@ -1300,39 +1323,58 @@ def main() -> None:
     else:
         # TODO: Consider adding a quicklook flag
         try:
-            # TODO: Would be better if we could find a way to not ask the user for the OTP manually
-            providers = (scene.provider for scene in search_result)
+            providers = {scene.provider for scene in search_result}
             if "creodias" in providers:
-                gs.message(
-                    _(
-                        "Please enter Creodias OTP, to discard Creodias scenes enter '-': ",
-                    ),
-                )
-                creodias_otp = input().strip()
+                providers_cfg = dag.providers_config
+                creodias_otp = None
+
+                if "creodias" in providers_cfg:
+                    totp_secret = providers_cfg["creodias"].auth.credentials.get("totp")
+                    if pyotp and totp_secret:
+                        gs.info(_("Generating Creodias OTP automatically..."))
+                        offset = get_time_offset()
+                        adjusted_time = datetime.now() + offset
+                        creodias_otp = pyotp.TOTP(totp_secret.replace(" ", "")).at(
+                            adjusted_time
+                        )
+
+                if not creodias_otp:
+                    gs.message(
+                        _(
+                            "Please enter Creodias OTP, to discard Creodias scenes enter '-': ",
+                        ),
+                    )
+                    creodias_otp = input().strip()
+
                 if creodias_otp == "-":
                     search_result = SearchResult(
-                        [
-                            scene
-                            for scene in search_result
-                            if scene.provider != "creodias"
-                        ],
+                        [s for s in search_result if s.provider != "creodias"]
                     )
+                elif "creodias" in providers_cfg:
+                    providers_cfg["creodias"].auth.credentials["totp"] = creodias_otp
                 else:
-                    dag.providers_config["creodias"].auth.credentials["totp"] = (
-                        creodias_otp
+                    gs.warning(
+                        _("Creodias configuration not found, skipping OTP assignment.")
                     )
-                    dag._plugins_manager.get_auth_plugin("creodias").authenticate()
+
+            if not search_result:
+                gs.message(_("Nothing to download.\nExiting..."))
+                return
+
             custom_config = {
                 "timeout": int(options["timeout"]),
                 "wait": int(options["wait"]),
             }
-            if not search_result:
-                gs.message(_("Nothing to download.\nExiting..."))
+
             if options["output"]:
                 custom_config["output_dir"] = options["output"]
+
             dag.download_all(search_result, **custom_config)
+
         except MisconfiguredError as e:
-            gs.fatal(_(e))
+            gs.fatal(_("EODAG configuration error: {}").format(e))
+        except KeyError as e:
+            gs.fatal(_("Missing provider configuration: {}").format(e))
 
 
 if __name__ == "__main__":
