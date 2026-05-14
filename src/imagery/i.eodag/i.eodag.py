@@ -1513,9 +1513,7 @@ def main() -> None:
                         dag._plugins_manager.get_auth_plugin("creodias").authenticate()
                 else:
                     gs.warning(
-                        _(
-                            "Creodias configuration not found, skipping OTP assignment."
-                        )
+                        _("Creodias configuration not found, skipping OTP assignment.")
                     )
 
             if not search_result:
