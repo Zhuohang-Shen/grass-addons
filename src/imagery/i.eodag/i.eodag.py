@@ -1510,9 +1510,7 @@ def main() -> None:
                 elif "creodias" in providers_cfg:
                     providers_cfg["creodias"].auth.credentials["totp"] = creodias_otp
                     if hasattr(dag, "_plugins_manager"):
-                        dag._plugins_manager.get_auth_plugin(
-                            "creodias"
-                        ).authenticate()
+                        dag._plugins_manager.get_auth_plugin("creodias").authenticate()
                 else:
                     gs.warning(
                         _(
